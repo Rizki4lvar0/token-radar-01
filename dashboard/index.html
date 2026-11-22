@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Radar — pre-token protocols ranked by implied value</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div>
+    <h1>Token Radar</h1>
+    <p class="sub">Pre-token protocols, ranked by an implied value fitted from the peers that already trade. No token named here is promised — every value is the model's own claim, from the snapshot's figures alone.</p>
+  </div>
+  <div class="meta" id="meta"></div>
+</header>
+
+<section class="strip" id="integrity" aria-label="Integrity checks"></section>
+
+<main>
+  <section class="panel" id="model-panel">
+    <h2>How the value is priced</h2>
+    <p id="model-text"></p>
+    <dl class="metrics" id="metrics"></dl>
+    <p class="note" id="model-note"></p>
+  </section>
+
+  <section class="panel controls">
+    <label>Search <input id="q" type="search" placeholder="Name or slug"></label>
+    <label>Category <select id="cat"><option value="">All categories</option></select></label>
+    <label>Chain <select id="chain"><option value="">All chains</option></select></label>
+    <label class="check"><input id="watch" type="checkbox"> Watchlist only</label>
+    <label>Sort <select id="sort">
+      <option value="rank">Rank (implied value)</option>
+      <option value="tvl">TVL</option>
+      <option value="growth">7-day growth</option>
+      <option value="age">Age (days listed)</option>
+    </select></label>
+  </section>
+
+  <section class="panel">
+    <h2 id="board-title">The board</h2>
+    <p class="note" id="board-note"></p>
+    <div class="table-wrap">
+      <table id="board">
+        <thead><tr><th>#</th><th>Protocol</th><th>Category</th><th>Chains</th><th>TVL</th><th>7d</th><th>Age</th><th>Implied value</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel" id="detail-panel">
+    <h2>Protocol detail</h2>
+    <div id="detail"><p class="note">Select a row in the board to see its value breakdown and farm plan.</p></div>
+  </section>
+
+  <section class="panel">
+    <h2>Live tokens, set aside</h2>
+    <p class="note">These protocols already trade, so the board shows the market's own value for them instead of a model price. They are the peers the model was fitted on.</p>
+    <div class="table-wrap">
+      <table id="live">
+        <thead><tr><th>Protocol</th><th>Category</th><th>Chains</th><th>TVL</th><th>Market cap</th><th>7d</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Coverage: all 758 protocols accounted for</h2>
+    <p class="note" id="coverage"></p>
+    <dl class="metrics" id="coverage-metrics"></dl>
+  </section>
+</main>
+
+<footer>
+  <p>Data: sealed snapshot, DefiLlama protocols endpoint, as of the date shown above. A protocol is called pre-token only because its record carries no token — the record is not proof it has none. Farm steps are generic guidance, not financial advice; never pay to claim an airdrop.</p>
+</footer>
+<script src="../data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
