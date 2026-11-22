@@ -29,6 +29,12 @@ tbody tr { cursor: pointer; }
 tbody tr:hover { background: #1f242c; }
 tbody tr.selected { background: #1c2b3d; }
 .badge { display: inline-block; background: #1f3a5f; color: var(--accent); border-radius: 4px; padding: 0 6px; font-size: 12px; margin-left: 6px; }
+.badge.verdict-farm { background: #12391f; color: var(--green); margin-left: 0; }
+.badge.verdict-thin { background: #3a2f10; color: var(--amber); margin-left: 0; }
+.badge.verdict-skip { background: #3d1618; color: var(--red); margin-left: 0; }
+#ablation tbody tr { cursor: default; }
+#board th, #board td { padding: 6px 5px; font-size: 12px; }
+.panel h3 { margin: 14px 0 4px; font-size: 15px; }
 .pos { color: var(--green); } .neg { color: var(--red); }
 .detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px 24px; }
 .detail-grid h3 { margin: 12px 0 4px; font-size: 14px; color: var(--muted); }

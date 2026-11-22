@@ -21,9 +21,16 @@
 //     on the rest, and the error on the held-out peers is reported.
 //   * walk-forward: peers listed before the median listing date train the
 //     model; peers listed after it are the test set.
+//   * ablation: the model is refit with one term removed at a time and scored
+//     on the same held-out peers, so each term has to earn its keep.
 // Both are honest about the fit: the peer ratio is noisy (R^2 near 0.2),
 // so implied values are order-of-magnitude estimates and each row carries
 // its interval. The dashboard states the numbers instead of hiding them.
+//
+// Each row also carries a farm verdict (FARM / THIN / SKIP) and a break-even,
+// computed from numbers already on the row: the plan's out-of-pocket spend
+// against one farmer's assumed 1-in-10,000 share of the implied value.
+// The verdict never changes the ranking or the values.
 
 export interface SnapshotProtocol {
   slug: string;
@@ -56,6 +63,8 @@ export interface FitMetrics {
   held_out: { n_train: number; n_test: number; rmse_log10: number; mae_log10: number };
   walk_forward: { n_train: number; n_test: number; rmse_log10: number; mae_log10: number; split_date: string | null };
   coefficients: number[];
+  /** Held-out RMSE of the full model, then of the model refit with one term removed. */
+  ablation: { term: string; held_out_rmse_log10: number }[];
 }
 
 export interface BoardRow {
@@ -80,6 +89,15 @@ export interface BoardRow {
     maturity_days: number;
   };
   farm_steps: string[];
+  /** Farm verdict, from numbers already on the row: the plan's out-of-pocket
+   * spend, the airdrop that would break even, and one farmer's assumed share
+   * of the implied value at the low end of its range. */
+  farm: {
+    verdict: 'FARM' | 'THIN' | 'SKIP';
+    spend_usd: number;
+    break_even_usd: number;
+    expected_low_usd: number;
+  };
 }
 
 export interface LiveRow {
@@ -107,7 +125,7 @@ export interface RadarData {
   live: LiveRow[];
 }
 
-export const MODEL_VERSION = 'radar-peerfit-1';
+export const MODEL_VERSION = 'radar-peerfit-2';
 
 const DAY_MS = 86_400_000;
 const UNKNOWN_AGE_DAYS = 365;
@@ -150,10 +168,14 @@ export function exclusionReason(p: SnapshotProtocol): string | null {
   return null;
 }
 
-/** Features for the peer regression. */
-function features(p: SnapshotProtocol, asOf: string): number[] {
+/** Features for the peer regression. A dropped index is zeroed, which for OLS
+ * is the same as refitting without that term: its coefficient is pinned to
+ * zero by the ridge and the other coefficients refit around its absence. */
+function features(p: SnapshotProtocol, asOf: string, dropIdx: number | null = null): number[] {
   const age = ageDays(asOf, p.listed_at) ?? UNKNOWN_AGE_DAYS;
-  return [1, Math.log10(Math.max(1, p.tvl_usd)), clampGrowth(p.change_7d) / 100, Math.log1p(Math.max(0, age)), Math.min(4, p.chains.length)];
+  const f = [1, Math.log10(Math.max(1, p.tvl_usd)), clampGrowth(p.change_7d) / 100, Math.log1p(Math.max(0, age)), Math.min(4, p.chains.length)];
+  if (dropIdx !== null) f[dropIdx] = 0;
+  return f;
 }
 
 /** Solve (X'X + ridge*I) b = X'y by Gaussian elimination. X rows are feature vectors. */
@@ -235,31 +257,34 @@ interface FittedModel {
   lo: number;
   hi: number;
   rmse: number;
+  dropIdx: number | null;
+  useCategory: boolean;
 }
 
-function fitModel(peers: SnapshotProtocol[], logRatios: number[], asOf: string): FittedModel {
-  const beta = ols(peers.map((p) => features(p, asOf)), logRatios);
+function fitModel(peers: SnapshotProtocol[], logRatios: number[], asOf: string, dropIdx: number | null = null, useCategory = true): FittedModel {
+  const beta = ols(peers.map((p) => features(p, asOf, dropIdx)), logRatios);
   const globalMedian = median(logRatios);
   const byCat = categoryMedians(peers, logRatios);
   const catMedian = new Map<string, number>();
   for (const [cat, vals] of byCat) {
     catMedian.set(cat, (vals.length * median(vals) + 5 * globalMedian) / (vals.length + 5));
   }
-  const preds = peers.map((p, i) => predictOne(p, asOf, beta, globalMedian, catMedian));
+  const preds = peers.map((p, i) => predictOne(p, asOf, beta, globalMedian, catMedian, dropIdx, useCategory));
   const rmse = Math.sqrt(preds.reduce((s, pr, i) => s + (pr - logRatios[i]!) ** 2, 0) / Math.max(1, preds.length));
-  return { beta, globalMedian, catMedian, lo: percentile(logRatios, 0.05), hi: percentile(logRatios, 0.95), rmse };
+  return { beta, globalMedian, catMedian, lo: percentile(logRatios, 0.05), hi: percentile(logRatios, 0.95), rmse, dropIdx, useCategory };
 }
 
-function predictOne(p: SnapshotProtocol, asOf: string, beta: number[], globalMedian: number, catMedian: Map<string, number>): number {
-  const olsPred = dot(beta, features(p, asOf));
+function predictOne(p: SnapshotProtocol, asOf: string, beta: number[], globalMedian: number, catMedian: Map<string, number>, dropIdx: number | null = null, useCategory = true): number {
+  const olsPred = dot(beta, features(p, asOf, dropIdx));
+  if (!useCategory) return olsPred;
   const catPred = catMedian.get(p.category ?? 'Unknown') ?? globalMedian;
   return (olsPred + catPred) / 2;
 }
 
 function predictClamped(p: SnapshotProtocol, asOf: string, model: FittedModel): { logRatio: number; ols: number; cat: number } {
-  const olsPred = dot(model.beta, features(p, asOf));
+  const olsPred = dot(model.beta, features(p, asOf, model.dropIdx));
   const catPred = model.catMedian.get(p.category ?? 'Unknown') ?? model.globalMedian;
-  const raw = (olsPred + catPred) / 2;
+  const raw = model.useCategory ? (olsPred + catPred) / 2 : olsPred;
   return { logRatio: Math.min(model.hi, Math.max(model.lo, raw)), ols: olsPred, cat: catPred };
 }
 
@@ -292,6 +317,23 @@ export function fitAndValidate(snapshot: Snapshot): { model: FittedModel; metric
   const heldPred = testPeers.map((p) => predictClamped(p, snapshot.as_of, heldModel).logRatio);
   const held = errorStats(testY, heldPred);
 
+  // Ablation: refit with one term removed, scored on the same held-out peers.
+  // A term earns its keep when removing it makes the held-out error worse.
+  const TERM_NAMES = ['log TVL', '7-day growth', 'age', 'chain count'];
+  const ablation: { term: string; held_out_rmse_log10: number }[] = [
+    { term: 'full model', held_out_rmse_log10: Math.round(held.rmse * 1000) / 1000 },
+  ];
+  for (let d = 1; d <= 4; d++) {
+    const m = fitModel(trainPeers, trainY, snapshot.as_of, d, true);
+    const pr = testPeers.map((p) => predictClamped(p, snapshot.as_of, m).logRatio);
+    const e = errorStats(testY, pr);
+    ablation.push({ term: `without ${TERM_NAMES[d - 1]}`, held_out_rmse_log10: Math.round(e.rmse * 1000) / 1000 });
+  }
+  const noCatModel = fitModel(trainPeers, trainY, snapshot.as_of, null, false);
+  const noCatPred = testPeers.map((p) => predictClamped(p, snapshot.as_of, noCatModel).logRatio);
+  const noCat = errorStats(testY, noCatPred);
+  ablation.push({ term: 'without category median', held_out_rmse_log10: Math.round(noCat.rmse * 1000) / 1000 });
+
   // Walk-forward: train on peers listed before the median listing date, test after.
   const dated = peers
     .map((p, i) => ({ p, y: logRatios[i]!, d: p.listed_at }))
@@ -318,6 +360,7 @@ export function fitAndValidate(snapshot: Snapshot): { model: FittedModel; metric
     held_out: { n_train: trainPeers.length, n_test: testPeers.length, rmse_log10: Math.round(held.rmse * 1000) / 1000, mae_log10: Math.round(held.mae * 1000) / 1000 },
     walk_forward: { ...walk, rmse_log10: Math.round(walk.rmse_log10 * 1000) / 1000, mae_log10: Math.round(walk.mae_log10 * 1000) / 1000 },
     coefficients: model.beta.map((b) => Math.round(b * 10000) / 10000),
+    ablation,
   };
   return { model, metrics };
 }
@@ -358,12 +401,66 @@ function actionFor(p: SnapshotProtocol, capital: number, chain: string): string 
   return `Deposit $${capital} of USDC into ${name} on ${chain} and leave the position working.`;
 }
 
-/** Six costed, timed steps, derived from the protocol's own record. */
-export function farmSteps(p: SnapshotProtocol, age: number | null): string[] {
+/** Out-of-pocket spend of one farm plan: first gas, weekly gas over the hold,
+ * and the claim check. The deposit capital is not spend — it comes back with
+ * the position. */
+export function farmSpendUsd(p: SnapshotProtocol, age: number | null): number {
+  const capital = capitalFor(p);
+  const gasFirst = capital >= 150 ? 8 : 4;
+  const hold = holdDaysFor(age);
+  return gasFirst + Math.ceil(hold / 7) * 2 + 2;
+}
+
+/**
+ * Farm verdict, from numbers already on the row. A farmer's share of a launch
+ * is a tiny fraction of the protocol's implied value; we assume 1 in 10,000
+ * of it reaches one active farmer, and the dashboard says so. The verdict
+ * compares that expected share, at the low end of the value range, with the
+ * plan's out-of-pocket spend: FARM when even the low end covers the spend ten
+ * times over, THIN when it covers the spend at all, SKIP otherwise.
+ */
+export function farmVerdict(impliedLowUsd: number, impliedUsd: number, spendUsd: number): { verdict: 'FARM' | 'THIN' | 'SKIP'; expected_low_usd: number } {
+  const SHARE = 0.0001;
+  const expectedLow = impliedLowUsd * SHARE;
+  const expected = impliedUsd * SHARE;
+  const rounded = Math.round(expectedLow * 100) / 100;
+  if (expectedLow >= 10 * spendUsd) return { verdict: 'FARM', expected_low_usd: rounded };
+  if (expectedLow >= spendUsd || expected >= 10 * spendUsd) return { verdict: 'THIN', expected_low_usd: rounded };
+  return { verdict: 'SKIP', expected_low_usd: rounded };
+}
+
+/** A second, different qualifying action for the same protocol, done once
+ * mid-hold so the wallet shows two kinds of activity, not one repeated. */
+function secondActionFor(p: SnapshotProtocol, capital: number, chain: string): string {
+  const c = (p.category ?? '').toLowerCase();
+  const name = p.name;
+  const small = Math.max(10, Math.round(capital / 5));
+  if (c.includes('lend') || c.includes('cdp')) return `Borrow $${small} against the deposit once, then repay it the same week, so the wallet shows a borrow as well as a lend.`;
+  if (c.includes('dex') || c.includes('leveraged farm')) return `Swap $${small} through the main ${name} pool once, so the wallet shows a swap as well as liquidity.`;
+  if (c.includes('yield') || c.includes('vault')) return `Add a second, smaller deposit of $${small} from a different asset into the ${name} vault, so the wallet shows two deposits.`;
+  if (c.includes('perpetual') || c.includes('derivative')) return `Close the hedged position once and open one fresh small trade, so the wallet shows more than a single entry.`;
+  if (c.includes('restak') || c.includes('staking')) return `Restake the staking receipt once through the ${name} restaking route, so the wallet shows a second staking action.`;
+  if (c.includes('stable')) return `Hold the minted stablecoins in the ${name} savings route for a week, so the wallet shows a second stablecoin action.`;
+  if (c.includes('rwa') || c.includes('onchain capital') || c.includes('allocator')) return `Reinvest one distribution back into the same ${name} asset, so the wallet shows a reinvestment as well as a buy.`;
+  if (c.includes('basis')) return `Top up the ${name} basis position once with a small second deposit of $${small}, so the wallet shows two deposits.`;
+  if (c.includes('prediction')) return `Settle one market and enter a second small one on ${name}, so the wallet shows two settled markets.`;
+  if (c.includes('bridge')) return `Bridge $${small} back to the origin chain once through ${name}, so the wallet shows a round trip.`;
+  return `Make one second, different on-chain interaction — a vote, a second deposit or a small swap — so the wallet shows two kinds of activity.`;
+}
+
+/** Eight costed, timed steps, derived from the protocol's own record. */
+export function farmSteps(p: SnapshotProtocol, age: number | null, verdict: 'FARM' | 'THIN' | 'SKIP'): string[] {
   const chain = chainOf(p);
   const capital = capitalFor(p);
   const hold = holdDaysFor(age);
   const gas = capital >= 150 ? 8 : 4;
+  const spend = farmSpendUsd(p, age);
+  const verdictNote =
+    verdict === 'FARM'
+      ? 'even the low end of the value range would pay the spend back more than ten times over'
+      : verdict === 'THIN'
+        ? 'the low end of the range would just about cover the spend'
+        : 'even the point estimate would not cover the spend';
   const steps = [
     `Open a fresh wallet that holds only the funds you plan to farm, and store its recovery phrase offline. Cost: under $3 of gas for the first transaction. Time: 5 minutes.`,
     `${actionFor(p, capital, chain)} Cost: $${capital} of capital and about $${gas} of gas. Time: 15 minutes to set up.`,
@@ -371,6 +468,8 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): string[] {
     `Keep the position open for at least ${hold} days so the activity spans more than one points snapshot. Cost: the $${capital} stays in the position. Time: ${hold} days.`,
     `Before withdrawing, open the protocol's own rewards page from its official site and claim only through the link it publishes. Cost: nothing to check, and never pay to claim. Time: 10 minutes.`,
     `Log the wallet, the dates and every transaction in a farm notebook so you can repeat the position or unwind it cleanly. Cost: nothing but the notebook. Time: 5 minutes.`,
+    `${secondActionFor(p, capital, chain)} Cost: about $2 of gas. Time: 10 minutes, once.`,
+    `Break-even: an airdrop of at least $${spend} covers this plan's out-of-pocket spend of $${spend} (gas only; the $${capital} deposit comes back with the position). Verdict: ${verdict} — ${verdictNote}. Time: 5 minutes to check.`,
   ];
   return steps.map((s) => (s.length > 600 ? `${s.slice(0, 596)}...` : s));
 }
@@ -398,29 +497,34 @@ export function buildBoard(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
 
-  const board: BoardRow[] = scored.map((s, i) => ({
-    rank: i + 1,
-    slug: s.p.slug,
-    name: s.p.name,
-    category: s.p.category,
-    chains: s.p.chains,
-    tvl_usd: s.p.tvl_usd,
-    change_7d: s.p.change_7d,
-    age_days: s.age,
-    implied_value_usd: s.implied,
-    implied_low_usd: s.low,
-    implied_high_usd: s.high,
-    token_status: 'pre-token',
-    on_watchlist: watch.has(s.p.slug),
-    model: {
-      log_ratio: Math.round(s.pred.logRatio * 10000) / 10000,
-      ols_log_ratio: Math.round(s.pred.ols * 10000) / 10000,
-      category_log_ratio: Math.round(s.pred.cat * 10000) / 10000,
-      growth_pct: clampGrowth(s.p.change_7d),
-      maturity_days: s.age ?? UNKNOWN_AGE_DAYS,
-    },
-    farm_steps: farmSteps(s.p, s.age),
-  }));
+  const board: BoardRow[] = scored.map((s, i) => {
+    const spend = farmSpendUsd(s.p, s.age);
+    const v = farmVerdict(s.low, s.implied, spend);
+    return {
+      rank: i + 1,
+      slug: s.p.slug,
+      name: s.p.name,
+      category: s.p.category,
+      chains: s.p.chains,
+      tvl_usd: s.p.tvl_usd,
+      change_7d: s.p.change_7d,
+      age_days: s.age,
+      implied_value_usd: s.implied,
+      implied_low_usd: s.low,
+      implied_high_usd: s.high,
+      token_status: 'pre-token',
+      on_watchlist: watch.has(s.p.slug),
+      model: {
+        log_ratio: Math.round(s.pred.logRatio * 10000) / 10000,
+        ols_log_ratio: Math.round(s.pred.ols * 10000) / 10000,
+        category_log_ratio: Math.round(s.pred.cat * 10000) / 10000,
+        growth_pct: clampGrowth(s.p.change_7d),
+        maturity_days: s.age ?? UNKNOWN_AGE_DAYS,
+      },
+      farm_steps: farmSteps(s.p, s.age, v.verdict),
+      farm: { verdict: v.verdict, spend_usd: spend, break_even_usd: spend, expected_low_usd: v.expected_low_usd },
+    };
+  });
 
   const live: LiveRow[] = snapshot.protocols
     .filter((p) => !isPreToken(p) && p.category !== 'CEX')
@@ -466,6 +570,7 @@ export function buildBoard(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       on_watchlist: r.on_watchlist,
       model: r.model,
       farm_steps: r.farm_steps,
+      farm: r.farm,
     })),
     live,
   };

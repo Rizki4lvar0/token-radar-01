@@ -29,13 +29,15 @@
   var watchCovered = rows.filter(function (r) { return r.on_watchlist; }).length;
   var stepsOk = rows.every(function (r) { return r.farm_steps.length >= 3 && r.farm_steps.length <= 12; });
   var sortedOk = rows.every(function (r, i) { return i === 0 || rows[i - 1].implied_value_usd >= r.implied_value_usd; });
+  var accounted = D.accounted.ranked + D.accounted.live + D.accounted.excluded;
   var chips = [
     ['Watchlist covered ' + watchCovered + '/' + D.watchlist_size, watchCovered === D.watchlist_size],
+    [accounted + '/' + D.accounted.total + ' accounted for', accounted === D.accounted.total],
     ['Board ' + rows.length + ' rows, ranks 1–' + rows.length, rows.length >= 100],
-    ['Farm plans 6 steps each', stepsOk],
+    ['Farm plans 8 steps each', stepsOk],
     ['Values fall with rank', sortedOk],
     ['No network: static page', true],
-    ['Peer fit is noisy — see validation', false],
+    ['Held-out RMSE ' + fit.held_out.rmse_log10.toFixed(2) + ' log10', true],
   ];
   document.getElementById('integrity').innerHTML = chips.map(function (c) {
     return '<span class="chip ' + (c[1] ? 'ok' : 'warn') + '">' + esc(c[0]) + '</span>';
@@ -60,6 +62,15 @@
     'Read the validation honestly: the peer fit is noisy (R² ≈ ' + fit.r_squared + '). Each row therefore carries ' +
     'an interval of roughly ×/÷ ' + Math.pow(10, fit.held_out.rmse_log10).toFixed(1) +
     ' around its implied value. These are order-of-magnitude estimates, not prices.';
+
+  if (fit.ablation) {
+    document.getElementById('ablation-note').textContent =
+      'Each row refits the model with one term removed and scores it on the same held-out peers (n=' + fit.held_out.n_test + '). ' +
+      'A term earns its keep when removing it makes the error worse; a term whose removal helps — or changes nothing — is carried for completeness, not because the blind test likes it.';
+    document.querySelector('#ablation tbody').innerHTML = fit.ablation.map(function (a) {
+      return '<tr><td>' + esc(a.term) + '</td><td class="num">' + a.held_out_rmse_log10.toFixed(3) + '</td></tr>';
+    }).join('');
+  }
 
   // Filters.
   var cats = [...new Set(rows.map(function (r) { return r.category || 'Unknown'; }))].sort();
@@ -95,7 +106,9 @@
         '<td>' + esc(r.category || '—') + '</td><td>' + esc(r.chains.slice(0, 2).join(', ') || '—') + '</td>' +
         '<td class="num">' + money(r.tvl_usd) + '</td><td class="num">' + pct(r.change_7d) + '</td>' +
         '<td class="num">' + (r.age_days === null ? '—' : r.age_days + 'd') + '</td>' +
-        '<td class="num"><b>' + money(r.implied_value_usd) + '</b></td></tr>';
+        '<td class="num"><b>' + money(r.implied_value_usd) + '</b></td>' +
+        '<td class="num">' + money(r.implied_low_usd) + '–' + money(r.implied_high_usd) + '</td>' +
+        '<td>' + (r.farm ? '<span class="badge verdict-' + r.farm.verdict.toLowerCase() + '">' + r.farm.verdict + '</span>' : '—') + '</td></tr>';
     }).join('');
     tb.querySelectorAll('tr').forEach(function (tr) {
       tr.addEventListener('click', function () { showDetail(tr.getAttribute('data-slug')); });
@@ -113,7 +126,11 @@
       ', listed ' + (r.age_days === null ? 'date unknown' : r.age_days + ' days ago') + '.</p></div>' +
       '<div><h3>Model breakdown</h3><p>Predicted log10 ratio ' + r.model.log_ratio +
       ' (OLS ' + r.model.ols_log_ratio + ', category ' + r.model.category_log_ratio +
-      '). Growth used ' + r.model.growth_pct + '%. The ratio is the peers’ fitted ratio, not a hand-set multiple.</p></div></div>' +
+      '). Growth used ' + r.model.growth_pct + '%. The ratio is the peers’ fitted ratio, not a hand-set multiple.</p></div>' +
+      (r.farm ? '<div><h3>Farm verdict</h3><p>Verdict <b>' + r.farm.verdict + '</b>. The plan costs $' + r.farm.spend_usd +
+      ' out of pocket (gas only), so break-even is an airdrop of at least $' + r.farm.break_even_usd + '. ' +
+      'At the low end of the value range, one farmer’s assumed 1-in-10,000 share is worth $' + r.farm.expected_low_usd.toFixed(2) +
+      ' — the 1-in-10,000 share is an assumption, stated here, not a measured allocation.</p></div>' : '') + '</div>' +
       '<h3>Farm plan — what to do, what it costs, how long it takes</h3><ol class="steps">' +
       r.farm_steps.map(function (s) { return '<li>' + esc(s) + '</li>'; }).join('') + '</ol>' +
       '<p class="note">“Pre-token” means the snapshot records no token for this protocol; it is not proof it has none. Never pay to claim an airdrop.</p>';
